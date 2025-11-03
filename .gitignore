@@ -1,0 +1,15 @@
+datasets/
+build/
+logs/
+temp/
+*.log
+*.tmp
+*.bak
+.DS_Store
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+env/
+venv/
+.env
