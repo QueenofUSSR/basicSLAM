@@ -1,5 +1,6 @@
 datasets/
 build/
+result/
 logs/
 temp/
 *.log

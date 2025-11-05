@@ -8,6 +8,11 @@
 #include <iostream>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/highgui.hpp>
+#include <filesystem>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
+#include <cmath>
 
 Controller::Controller() {
     // empty
@@ -44,7 +49,8 @@ int Controller::run(const std::string &imageDir, double scale_m){
 
         if(!prevGray.empty() && !prevDesc.empty() && !desc.empty()){
             std::vector<cv::DMatch> goodMatches;
-            matcher.knnMatch(prevDesc, desc, goodMatches);
+            // use stronger matching: ratio + mutual cross-check + spatial bucketing
+            matcher.match(prevDesc, desc, prevKp, kps, goodMatches, gray.cols, gray.rows, 8, 8, 4);
 
             cv::Mat imgMatches;
             cv::drawMatches(prevGray, prevKp, gray, kps, goodMatches, imgMatches,
@@ -57,9 +63,83 @@ int Controller::run(const std::string &imageDir, double scale_m){
                 pts2.push_back(kps[m.trainIdx].pt);
             }
 
+            // quick frame-diff to detect near-static frames
+            double meanDiff = 0.0;
+            if(!prevGray.empty()){
+                cv::Mat diff; cv::absdiff(gray, prevGray, diff);
+                meanDiff = cv::mean(diff)[0];
+            }
+
+            // compute median displacement (flow) between matched keypoints
+            double median_flow = 0.0;
+            if(!pts1.empty()){
+                std::vector<double> dists; dists.reserve(pts1.size());
+                for(size_t i=0;i<pts1.size();++i){
+                    double dx = pts2[i].x - pts1[i].x;
+                    double dy = pts2[i].y - pts1[i].y;
+                    dists.push_back(std::sqrt(dx*dx + dy*dy));
+                }
+                size_t mid = dists.size()/2;
+                std::nth_element(dists.begin(), dists.begin()+mid, dists.end());
+                median_flow = dists[mid];
+            }
+
             if(pts1.size() >= 8){
                 cv::Mat R, t, mask; int inliers = 0;
-                if(poseEst.estimate(pts1, pts2, loader.fx(), loader.fy(), loader.cx(), loader.cy(), R, t, mask, inliers)){
+                bool ok = poseEst.estimate(pts1, pts2, loader.fx(), loader.fy(), loader.cx(), loader.cy(), R, t, mask, inliers);
+
+                int matchCount = static_cast<int>(goodMatches.size());
+                double inlierRatio = matchCount > 0 ? double(inliers) / double(matchCount) : 0.0;
+
+                // thresholds (tunable) -- relaxed and add absolute inlier guard
+                const int MIN_MATCHES = 15;           // require at least this many matches (relative)
+                const int MIN_INLIERS = 4;             // OR accept if at least this many absolute inliers
+                double t_norm = 0.0, rot_angle = 0.0;
+                if(ok){
+                    cv::Mat t_d; t.convertTo(t_d, CV_64F);
+                    t_norm = cv::norm(t_d);
+                    cv::Mat R_d; R.convertTo(R_d, CV_64F);
+                    double trace = R_d.at<double>(0,0) + R_d.at<double>(1,1) + R_d.at<double>(2,2);
+                    double cos_angle = std::min(1.0, std::max(-1.0, (trace - 1.0) * 0.5));
+                    rot_angle = std::acos(cos_angle);
+                }
+
+                // Print per-frame diagnostics
+                std::cout << "F" << frame_id << " diff=" << meanDiff << " median_flow=" << median_flow
+                          << " matches=" << matchCount << " inliers=" << inliers << " inlierRatio=" << inlierRatio
+                          << " t_norm=" << t_norm << " rot_rad=" << rot_angle << std::endl;
+
+                // decide whether to integrate
+                // Prefer geometry-based decision (absolute inliers OR matchCount + ratio). Use image-diff/flow
+                // only to skip when geometry is weak or motion truly negligible.
+                bool integrate = true;
+                if(!ok){
+                    integrate = false;
+                    std::cout << "  -> pose estimation failed, skipping integration." << std::endl;
+                } else if(inliers < MIN_INLIERS || matchCount < MIN_MATCHES){
+                    // Not enough geometric support -> skip (unless absolute inliers pass)
+                    integrate = false;
+                    std::cout << "  -> insufficient matches/inliers (by both absolute and relative metrics), skipping integration." << std::endl;
+                } else {
+                    // We have sufficient geometric support. Only skip if motion is truly negligible
+                    // (both translation and rotation tiny) AND the image/flow indicate near-identical frames.
+                    const double MIN_TRANSLATION_NORM = 1e-4;
+                    const double MIN_ROTATION_RAD = (0.5 * CV_PI / 180.0); // 0.5 degree
+                    const double DIFF_ZERO_THRESH = 2.0;   // nearly identical image
+                    const double FLOW_ZERO_THRESH = 0.3;   // nearly zero flow in pixels
+
+                    if(t_norm < MIN_TRANSLATION_NORM && std::abs(rot_angle) < MIN_ROTATION_RAD
+                       && meanDiff < DIFF_ZERO_THRESH && median_flow < FLOW_ZERO_THRESH){
+                        integrate = false; // truly static
+                        std::cout << "  -> negligible motion and near-identical frames, skipping integration." << std::endl;
+                    }
+                }
+                if (inliers >= MIN_INLIERS || (inliers >= 2 && matchCount > 50 && median_flow > 2.0)) {
+                    integrate = true;
+                }
+
+                if(integrate){
+                    // convert and integrate
                     cv::Mat t_d; t.convertTo(t_d, CV_64F);
                     cv::Mat t_scaled = t_d * scale_m;
                     cv::Mat R_d; R.convertTo(R_d, CV_64F);
@@ -75,6 +155,7 @@ int Controller::run(const std::string &imageDir, double scale_m){
                 } else {
                     vis.showFrame(gray);
                 }
+
             } else {
                 vis.showFrame(gray);
             }
@@ -91,6 +172,24 @@ int Controller::run(const std::string &imageDir, double scale_m){
         if(key == 27) break;
     }
 
-    vis.saveTrajectory("trajectory.png");
+    // save trajectory with timestamp into result/ folder
+    try{
+        std::filesystem::path outDir("../../result");
+        if(!std::filesystem::exists(outDir)) std::filesystem::create_directories(outDir);
+        auto now = std::chrono::system_clock::now();
+        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm = *std::localtime(&t);
+        std::ostringstream ss;
+        ss << std::put_time(&tm, "%Y%m%d_%H%M%S");
+        std::string fname = std::string("trajectory_") + ss.str() + std::string(".png");
+        std::filesystem::path outPath = outDir / fname;
+        if(vis.saveTrajectory(outPath.string())){
+            std::cout << "Saved trajectory to " << outPath.string() << std::endl;
+        } else {
+            std::cerr << "Failed to save trajectory to " << outPath.string() << std::endl;
+        }
+    } catch(const std::exception &e){
+        std::cerr << "Error saving trajectory: " << e.what() << std::endl;
+    }
     return 0;
 }
