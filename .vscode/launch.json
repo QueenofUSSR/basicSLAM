@@ -9,7 +9,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/tests/testFeature",
-            "args": ["${workspaceFolder}/datasets/MH01/mav0/cam0/data"],
+            "args": [],
             "cwd": "${workspaceFolder}/build/tests",
             "stopAtEntry": false,
             "environment": [],

@@ -21,6 +21,7 @@ void Visualizer::addPose(double x, double z){
 
 void Visualizer::showFrame(const cv::Mat &frame){
     if(frame.empty()) return;
+    // Do not draw heading overlay on video frames; only show raw frame.
     cv::imshow("frame", frame);
 }
 
@@ -35,7 +36,29 @@ void Visualizer::showTopdown(){
     }
     if(!traj_.empty()){
         cv::Point p = worldToPixel(traj_.back());
-        cv::circle(map_, p, 6, cv::Scalar(0,0,255), -1);
+        // draw heading arrow on topdown map based on recent trajectory
+        if(traj_.size() >= 2){
+            int K = std::min<size_t>(5, traj_.size()-1);
+            double dx = 0.0, dz = 0.0;
+            for(int i=0;i<K;i++){
+                auto a = traj_[traj_.size()-1 - i];
+                auto b = traj_[traj_.size()-2 - i];
+                dx += (a.x - b.x);
+                dz += (a.y - b.y);
+            }
+            dx /= K; dz /= K;
+            double norm = std::hypot(dx, dz);
+            if(norm > 1e-6){
+                dx /= norm; dz /= norm;
+                // arrow length in world meters
+                double arrow_m = 0.5; // 0.5 meters
+                // tail is behind the current position by arrow_m, head (tip) at current position
+                cv::Point2d tail_world(traj_.back().x - dx * arrow_m, traj_.back().y - dz * arrow_m);
+                cv::Point tail_px = worldToPixel(tail_world);
+                cv::arrowedLine(map_, tail_px, p, cv::Scalar(0,0,255), 2, cv::LINE_AA, 0, 0.3);
+            }
+        }
+        // label near current position
         cv::putText(map_, "Robot", p + cv::Point(10,-10), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255,255,255), 1);
     }
     cv::imshow("topdown", map_);

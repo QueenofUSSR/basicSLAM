@@ -20,6 +20,7 @@ Controller::Controller() {
 
 int Controller::run(const std::string &imageDir, double scale_m){
     DataLoader loader(imageDir);
+    std::cout << "Controller: loaded " << loader.size() << " images from " << imageDir << std::endl;
     if(loader.size() == 0){
         std::cerr << "Controller: no images found in " << imageDir << std::endl;
         return -1;
@@ -138,8 +139,8 @@ int Controller::run(const std::string &imageDir, double scale_m){
                     integrate = true;
                 }
 
+                // integrate transform if allowed
                 if(integrate){
-                    // convert and integrate
                     cv::Mat t_d; t.convertTo(t_d, CV_64F);
                     cv::Mat t_scaled = t_d * scale_m;
                     cv::Mat R_d; R.convertTo(R_d, CV_64F);
@@ -147,14 +148,39 @@ int Controller::run(const std::string &imageDir, double scale_m){
                     R_g = R_g * R_d;
                     double x = t_g.at<double>(0);
                     double z = t_g.at<double>(2);
-                    vis.addPose(x,z);
-                    // annotate and show
-                    std::string info = std::string("Frame ")+std::to_string(frame_id)+" " + imgPath + " matches=" + std::to_string(goodMatches.size()) + " inliers=" + std::to_string(inliers);
-                    cv::putText(imgMatches, info, cv::Point(10,20), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2);
-                    vis.showFrame(imgMatches);
-                } else {
-                    vis.showFrame(gray);
+                    vis.addPose(x,-z);
                 }
+
+                // Always show a single image; if we have matches, draw small boxes around matched keypoints
+                cv::Mat visImg;
+                if(frame.channels() > 1) visImg = frame.clone();
+                else cv::cvtColor(gray, visImg, cv::COLOR_GRAY2BGR);
+                std::string info = std::string("Frame ") + std::to_string(frame_id) + " matches=" + std::to_string(matchCount) + " inliers=" + std::to_string(inliers);
+
+                if(!goodMatches.empty()){
+                    for(size_t mi=0; mi<goodMatches.size(); ++mi){
+                        // prefer refined pts2 if available, otherwise use keypoint location
+                        cv::Point2f p2;
+                        if(mi < pts2.size()) p2 = pts2[mi];
+                        else p2 = kps[goodMatches[mi].trainIdx].pt;
+
+                        // determine inlier status from mask (robust to mask shape)
+                        bool isInlier = false;
+                        if(!mask.empty()){
+                            if(mask.rows == static_cast<int>(goodMatches.size())){
+                                isInlier = mask.at<uchar>(static_cast<int>(mi), 0) != 0;
+                            } else if(mask.cols == static_cast<int>(goodMatches.size())){
+                                isInlier = mask.at<uchar>(0, static_cast<int>(mi)) != 0;
+                            }
+                        }
+                        cv::Scalar col = isInlier ? cv::Scalar(0,255,0) : cv::Scalar(0,0,255);
+                        cv::Point ip(cvRound(p2.x), cvRound(p2.y));
+                        cv::Rect r(ip - cv::Point(4,4), cv::Size(8,8));
+                        cv::rectangle(visImg, r, col, 2, cv::LINE_AA);
+                    }
+                }
+                cv::putText(visImg, info, cv::Point(10,20), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2);
+                vis.showFrame(visImg);
 
             } else {
                 vis.showFrame(gray);
