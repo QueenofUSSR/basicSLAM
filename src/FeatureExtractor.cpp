@@ -2,6 +2,8 @@
 
 #include <limits>
 #include <cmath>
+#include <opencv2/video/tracking.hpp>
+#include <map>
 
 FeatureExtractor::FeatureExtractor(int nfeatures)
     : nfeatures_(nfeatures)
@@ -48,23 +50,113 @@ static void anms(const std::vector<cv::KeyPoint> &in, std::vector<cv::KeyPoint> 
     for(int i=0;i<take;++i) out.push_back(in[idx[i]]);
 }
 
-void FeatureExtractor::detectAndCompute(const cv::Mat &image, std::vector<cv::KeyPoint> &kps, cv::Mat &desc)
+// Unified detectAndCompute: uses flow-aware allocation when prevGray/prevKp provided,
+// otherwise falls back to ANMS selection.
+void FeatureExtractor::detectAndCompute(const cv::Mat &image, std::vector<cv::KeyPoint> &kps, cv::Mat &desc,
+                                       const cv::Mat &prevGray, const std::vector<cv::KeyPoint> &prevKp,
+                                       double flow_lambda)
 {
     kps.clear(); desc.release();
     if(image.empty()) return;
 
-    // 1) detect candidate keypoints with ORB (so we have responses)
+    // detect candidates with ORB
     std::vector<cv::KeyPoint> candidates;
     orb_->detect(image, candidates);
+    if(candidates.empty()) return;
 
-    // 2) apply ANMS to select up to nfeatures_
-    std::vector<cv::KeyPoint> selected;
-    anms(candidates, selected, nfeatures_);
+    // If no previous-frame info is provided, use simple ANMS + descriptor computation
+    if(prevGray.empty() || prevKp.empty()){
+        std::vector<cv::KeyPoint> selected;
+        anms(candidates, selected, nfeatures_);
+        if(selected.empty()) return;
+        orb_->compute(image, selected, desc);
+        kps = std::move(selected);
+        return;
+    }
 
-    // 3) compute descriptors for selected keypoints
+    // Flow-aware scoring path -------------------------------------------------
+    // 1) track previous keypoints into current frame to estimate flows
+    std::vector<cv::Point2f> trackedPts;
+    std::vector<unsigned char> status;
+    std::vector<float> err;
+    std::vector<double> trackedFlows; // aligned with prevKp
+    std::vector<cv::Point2f> prevPts; prevPts.reserve(prevKp.size());
+    for(const auto &kp: prevKp) prevPts.push_back(kp.pt);
+    trackedPts.resize(prevPts.size()); status.resize(prevPts.size()); err.resize(prevPts.size());
+    try{
+        cv::calcOpticalFlowPyrLK(prevGray, image, prevPts, trackedPts, status, err, cv::Size(21,21), 3,
+                                 cv::TermCriteria(cv::TermCriteria::COUNT+cv::TermCriteria::EPS, 30, 0.01), 0, 1e-4);
+    } catch(...) { status.clear(); }
+    trackedFlows.resize(prevPts.size());
+    for(size_t i=0;i<prevPts.size();++i){
+        if(status.size() == prevPts.size() && status[i]){
+            double dx = trackedPts[i].x - prevPts[i].x;
+            double dy = trackedPts[i].y - prevPts[i].y;
+            trackedFlows[i] = std::sqrt(dx*dx + dy*dy);
+        } else trackedFlows[i] = 0.0;
+    }
+
+    // 2) assign a flow value to each candidate: find nearest tracked point within radius
+    const double FLOW_NEIGHBOR_RADIUS = 8.0; // px
+    double diag = std::sqrt(double(image.cols)*double(image.cols) + double(image.rows)*double(image.rows));
+    struct CandScore { double score; double flow; int idx; };
+    std::vector<CandScore> scored; scored.reserve(candidates.size());
+    for(size_t i=0;i<candidates.size();++i){
+        double flow = 0.0;
+        if(!trackedFlows.empty()){
+            double bestd = FLOW_NEIGHBOR_RADIUS*FLOW_NEIGHBOR_RADIUS; int besti = -1;
+            for(size_t j=0;j<trackedFlows.size();++j){
+                if(trackedFlows[j] <= 0.0) continue;
+                double dx = candidates[i].pt.x - trackedPts[j].x;
+                double dy = candidates[i].pt.y - trackedPts[j].y;
+                double d2 = dx*dx + dy*dy;
+                if(d2 < bestd){ bestd = d2; besti = (int)j; }
+            }
+            if(besti >= 0) flow = trackedFlows[besti];
+        }
+        double resp = candidates[i].response;
+        double norm_flow = diag > 0.0 ? (flow / diag) : flow;
+        double score = resp * (1.0 + flow_lambda * norm_flow);
+        scored.push_back({score, flow, (int)i});
+    }
+
+    // 3) grid allocation (ORB-style): split into grid and take top per-cell
+    const int GRID_ROWS = 8;
+    const int GRID_COLS = 8;
+    int cellW = std::max(1, image.cols / GRID_COLS);
+    int cellH = std::max(1, image.rows / GRID_ROWS);
+    int cellCap = (nfeatures_ + GRID_ROWS*GRID_COLS - 1) / (GRID_ROWS*GRID_COLS);
+    std::vector<std::vector<CandScore>> buckets(GRID_ROWS * GRID_COLS);
+    for(const auto &c: scored){
+        const cv::KeyPoint &kp = candidates[c.idx];
+        int cx = std::min(GRID_COLS-1, std::max(0, int(kp.pt.x) / cellW));
+        int cy = std::min(GRID_ROWS-1, std::max(0, int(kp.pt.y) / cellH));
+        buckets[cy*GRID_COLS + cx].push_back(c);
+    }
+
+    std::vector<cv::KeyPoint> selected; selected.reserve(nfeatures_);
+    for(auto &b: buckets){
+        if(b.empty()) continue;
+        std::sort(b.begin(), b.end(), [](const CandScore &a, const CandScore &b){ return a.score > b.score; });
+        int take = std::min((int)b.size(), cellCap);
+        for(int i=0;i<take && (int)selected.size() < nfeatures_; ++i){
+            selected.push_back(candidates[b[i].idx]);
+        }
+    }
+
+    // if we still have space, fill from all candidates by global score
+    if((int)selected.size() < nfeatures_){
+        std::vector<CandScore> all = scored;
+        std::sort(all.begin(), all.end(), [](const CandScore &a, const CandScore &b){ return a.score > b.score; });
+        for(const auto &c: all){
+            if((int)selected.size() >= nfeatures_) break;
+            bool dup = false;
+            for(const auto &s: selected){ if(cv::norm(s.pt - candidates[c.idx].pt) < 1.0){ dup = true; break; } }
+            if(!dup) selected.push_back(candidates[c.idx]);
+        }
+    }
+
     if(selected.empty()) return;
     orb_->compute(image, selected, desc);
-
-    // return selected keypoints
     kps = std::move(selected);
 }
