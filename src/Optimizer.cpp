@@ -134,9 +134,77 @@ void Optimizer::localBundleAdjustment(
         mappoints[i].p.y = p[1];
         mappoints[i].p.z = p[2];
     }
-
-    std::cout << "Optimizer (g2o): localBundleAdjustment finished (iterations=" << iterations << ")" << std::endl;
 }
+
+#ifdef USE_OPENCV_SFM
+#include <opencv2/sfm.hpp>
+void Optimizer::localBundleAdjustmentSFM(
+    std::vector<KeyFrame> &keyframes,
+    std::vector<MapPoint> &mappoints,
+    const std::vector<int> &localKfIndices,
+    const std::vector<int> &fixedKfIndices,
+    double fx, double fy, double cx, double cy,
+    int iterations) {
+    (void)fixedKfIndices; (void)iterations;
+    if(localKfIndices.empty()) return;
+    // Prepare camera matrix
+    cv::Mat K = (cv::Mat_<double>(3,3) << fx, 0, cx, 0, fy, cy, 0, 0, 1);
+    // Prepare poses
+    std::vector<cv::Mat> Rs, ts;
+    Rs.reserve(localKfIndices.size()); ts.reserve(localKfIndices.size());
+    for(int idx : localKfIndices){
+        if(idx < 0 || idx >= (int)keyframes.size()) continue;
+        Rs.push_back(keyframes[idx].R_w.clone());
+        ts.push_back(keyframes[idx].t_w.clone());
+    }
+    // Prepare observations per point
+    std::vector<std::vector<cv::Point2f>> measurements(localKfIndices.size());
+    std::vector<cv::Point3d> points;
+    std::vector<int> mpIndices;
+    for(size_t i=0;i<mappoints.size();++i){
+        const auto &mp = mappoints[i];
+        // initialize empty measurements for each point per cam
+        bool observed = false;
+        std::vector<cv::Point2f> dummy(localKfIndices.size(), cv::Point2f(-1,-1));
+        for(const auto &obs : mp.observations){
+            int kfId = obs.first; int kpIdx = obs.second;
+            auto it = std::find(localKfIndices.begin(), localKfIndices.end(), kfId);
+            if(it == localKfIndices.end()) continue;
+            size_t camIdx = std::distance(localKfIndices.begin(), it);
+            const auto &kf = keyframes[kfId];
+            if(kpIdx >=0 && kpIdx < (int)kf.kps.size()){
+                dummy[camIdx] = kf.kps[kpIdx].pt; observed = true;
+            }
+        }
+        if(observed){
+            points.push_back(mp.p);
+            mpIndices.push_back((int)i);
+            for(size_t c=0;c<localKfIndices.size();++c){
+                if(measurements[c].size() < points.size()-1) {
+                    // align sizes
+                    measurements[c].resize(points.size()-1, cv::Point2f(-1,-1));
+                }
+                measurements[c].push_back(dummy[c]);
+            }
+        }
+    }
+    if(points.empty() || Rs.empty()) return;
+    // Run OpenCV SFM refine
+    cv::sfm::refine(points, Rs, ts, measurements, K);
+    // Write back poses
+    for(size_t i=0;i<localKfIndices.size() && i<Rs.size() && i<ts.size(); ++i){
+        int idx = localKfIndices[i];
+        if(idx < 0 || idx >= (int)keyframes.size()) continue;
+        keyframes[idx].R_w = Rs[i].clone();
+        keyframes[idx].t_w = ts[i].clone();
+    }
+    // Write back points
+    for(size_t j=0;j<mpIndices.size() && j<points.size(); ++j){
+        int mi = mpIndices[j];
+        if(mi >=0 && mi < (int)mappoints.size()) mappoints[mi].p = points[j];
+    }
+}
+#endif
 
 bool Optimizer::optimizePose(
     KeyFrame &kf,

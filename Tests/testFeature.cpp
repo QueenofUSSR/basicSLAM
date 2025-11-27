@@ -35,8 +35,9 @@ int main(int argc, char** argv)
     }
 
     // 图像目录（默认数据集路径）
-    string img_dir = "../../datasets/MH01/mav0/cam0/data";
-    // string img_dir = "../../datasets/self/2025-11-05_170219";
+    // string img_dir = "../../datasets/MH01/mav0/cam0/data";
+    string img_dir = "../../datasets/iphone/2025-11-05_170303";
+    // string img_dir = "../../datasets/vivo/room2";
     if(argc >= 2) img_dir = argv[1];
 
     double scale_m = 0.02; // 恢复的平移向量每单位对应的米（由用户提供）

@@ -20,6 +20,17 @@ public:
         const std::vector<int> &fixedKfIndices,
         double fx, double fy, double cx, double cy,
         int iterations = 10);
+
+#ifdef USE_OPENCV_SFM
+    // Alternative BA using OpenCV SFM module when available
+    static void localBundleAdjustmentSFM(
+        std::vector<KeyFrame> &keyframes,
+        std::vector<MapPoint> &mappoints,
+        const std::vector<int> &localKfIndices,
+        const std::vector<int> &fixedKfIndices,
+        double fx, double fy, double cx, double cy,
+        int iterations = 10);
+#endif
     
     // Pose-only optimization (optimize camera pose given fixed 3D points)
     static bool optimizePose(

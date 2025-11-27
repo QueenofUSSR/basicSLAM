@@ -36,6 +36,17 @@ target_link_libraries(basicslam_lib
         ${OpenCV_LIBS}
 )
 
+# Try to detect OpenCV SFM (optional, for BA with Ceres)
+set(OPENCV_SFM_FOUND OFF)
+find_package(OpenCV COMPONENTS sfm QUIET)
+if(TARGET opencv_sfm OR (OpenCV_LIBS MATCHES "opencv_sfm"))
+    set(OPENCV_SFM_FOUND ON)
+    message(STATUS "OpenCV SFM module found. BA backend will be enabled.")
+    target_compile_definitions(basicslam_lib PUBLIC USE_OPENCV_SFM)
+    # Ensure we link against sfm if present in OpenCV libs
+    target_link_libraries(basicslam_lib PUBLIC opencv_sfm)
+endif()
+
 # Optional: detect g2o and enable g2o-based optimizer when available.
 # First try pkg-config, then fallback to manual detection of headers/libs.
 find_package(PkgConfig)
