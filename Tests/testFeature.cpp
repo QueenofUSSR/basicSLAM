@@ -17,7 +17,7 @@
 using namespace std;
 using namespace cv;
 
-#include "Controller.hpp"
+#include "VisualOdometry.hpp"
 
 static Point worldToPixel(const Point2d &p, const Size &mapSize, double meters_per_pixel)
 {
@@ -34,16 +34,16 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    // 图像目录（默认数据集路径）
     // string img_dir = "../../datasets/MH01/mav0/cam0/data";
-    string img_dir = "../../datasets/iphone/2025-11-05_170303";
-    // string img_dir = "../../datasets/vivo/room2";
+    // string img_dir = "../../datasets/iphone/2025-11-05_170303";
+    string img_dir = "../../datasets/vivo/room";
     if(argc >= 2) img_dir = argv[1];
 
-    double scale_m = 0.02; // 恢复的平移向量每单位对应的米（由用户提供）
+    double scale_m = 0.02;
     if(argc >= 3) scale_m = atof(argv[2]);
 
-    // 使用 Controller 运行完整流水线
-    Controller ctrl;
-    return ctrl.run(img_dir, scale_m);
+    cv::Ptr<cv::Feature2D> feature = cv::ORB::create(2000);
+    cv::Ptr<cv::DescriptorMatcher> matcher = cv::DescriptorMatcher::create(cv::DescriptorMatcher::BRUTEFORCE_HAMMING);
+    cv::vo::VisualOdometry vo(feature, matcher);
+    return vo.run(img_dir, scale_m);
 }

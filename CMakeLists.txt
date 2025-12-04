@@ -129,6 +129,8 @@ set_target_properties(basicslam_lib PROPERTIES
 enable_testing()
 
 file(GLOB TEST_SOURCES RELATIVE ${CMAKE_SOURCE_DIR} CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/Tests/*.cpp)
+# Exclude VisualOdometry-dependent test if VO module is removed
+list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testVO\\.cpp$")
 
 foreach(test_src IN LISTS TEST_SOURCES)
     # test_src is like "Tests/test_foo.cpp"
