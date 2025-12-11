@@ -5,50 +5,70 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)    # 对编辑器友好
 
-# 如果你源码安装了 OpenCV 到 /usr/local，CMake 有时需要明确路径：
-# set(OpenCV_DIR "/usr/local/lib/cmake/opencv4")
+# 如果你源码安装了 OpenCV 到 /usr/local，下面的默认路径会自动启用本地版本；
+# 也可以在命令行通过 -DOpenCV_DIR=<path> 显式指定。
+set(LOCAL_OPENCV_DIR "/usr/local/lib/cmake/opencv4")
+if(NOT DEFINED OpenCV_DIR AND EXISTS ${LOCAL_OPENCV_DIR})
+    set(OpenCV_DIR ${LOCAL_OPENCV_DIR} CACHE PATH "Path to local OpenCV install" FORCE)
+    message(STATUS "Using local OpenCV config at ${OpenCV_DIR}")
+endif()
 
-find_package(OpenCV REQUIRED COMPONENTS core highgui features2d imgproc imgcodecs calib3d video)
+find_package(OpenCV REQUIRED COMPONENTS core highgui features2d imgproc imgcodecs calib3d video slam)
 
 # Optional: detect g2o via pkg-config and enable g2o-based optimizer when available
 
 
+# 是否构建仓库自带的 SLAM 管线；如果只想测试本地 OpenCV，可关闭该选项。
+option(BUILD_PIPELINE "Build basicSLAM library" ON)
+if(NOT EXISTS ${CMAKE_SOURCE_DIR}/src)
+    message(WARNING "src/ directory not found, disabling BUILD_PIPELINE")
+    set(BUILD_PIPELINE OFF)
+endif()
+
 # 源码和头文件
 set(PROJ_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
-file(GLOB_RECURSE PROJ_SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp)
+if(BUILD_PIPELINE)
+    file(GLOB_RECURSE PROJ_SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp)
+endif()
 
 message(STATUS "OpenCV include dirs: ${OpenCV_INCLUDE_DIRS}")
 message(STATUS "OpenCV libraries: ${OpenCV_LIBS}")
 message(STATUS "OpenCV DIR: ${OpenCV_DIR}")
 
-# 创建库（静态或共享，根据需要切换 STATIC/SHARED/omit）
-add_library(basicslam_lib STATIC ${PROJ_SOURCES})
-target_include_directories(basicslam_lib
-    PUBLIC
-        $<BUILD_INTERFACE:${PROJ_INCLUDE_DIR}>
-        $<INSTALL_INTERFACE:include>
-)
-target_compile_options(basicslam_lib PRIVATE -Wall -Wextra -Wpedantic)
+if(BUILD_PIPELINE)
+    # 创建库（静态或共享，根据需要切换 STATIC/SHARED/omit）
+    add_library(basicslam_lib STATIC ${PROJ_SOURCES})
+    if(EXISTS ${PROJ_INCLUDE_DIR})
+        target_include_directories(basicslam_lib
+            PUBLIC
+                $<BUILD_INTERFACE:${PROJ_INCLUDE_DIR}>
+                $<INSTALL_INTERFACE:include>
+        )
+    endif()
+    target_compile_options(basicslam_lib PRIVATE -Wall -Wextra -Wpedantic)
 
-# 链接 OpenCV 到库（可选：也可以链接到每个测试可执行）
-target_link_libraries(basicslam_lib
-    PUBLIC
-        ${OpenCV_LIBS}
-)
+    # 链接 OpenCV 到库（可选：也可以链接到每个测试可执行）
+    target_link_libraries(basicslam_lib
+        PUBLIC
+            ${OpenCV_LIBS}
+    )
+endif()
 
 # Try to detect OpenCV SFM (optional, for BA with Ceres)
-set(OPENCV_SFM_FOUND OFF)
-find_package(OpenCV COMPONENTS sfm QUIET)
-if(TARGET opencv_sfm OR (OpenCV_LIBS MATCHES "opencv_sfm"))
-    set(OPENCV_SFM_FOUND ON)
-    message(STATUS "OpenCV SFM module found. BA backend will be enabled.")
-    target_compile_definitions(basicslam_lib PUBLIC USE_OPENCV_SFM)
-    # Ensure we link against sfm if present in OpenCV libs
-    target_link_libraries(basicslam_lib PUBLIC opencv_sfm)
+if(BUILD_PIPELINE)
+    set(OPENCV_SFM_FOUND OFF)
+    find_package(OpenCV COMPONENTS sfm QUIET)
+    if(TARGET opencv_sfm OR (OpenCV_LIBS MATCHES "opencv_sfm"))
+        set(OPENCV_SFM_FOUND ON)
+        message(STATUS "OpenCV SFM module found. BA backend will be enabled.")
+        target_compile_definitions(basicslam_lib PUBLIC USE_OPENCV_SFM)
+        target_link_libraries(basicslam_lib PUBLIC opencv_sfm)
+    endif()
 endif()
 
 # Optional: detect g2o and enable g2o-based optimizer when available.
 # First try pkg-config, then fallback to manual detection of headers/libs.
+if(BUILD_PIPELINE)
 find_package(PkgConfig)
 if(PkgConfig_FOUND)
     pkg_check_modules(G2O g2o QUIET)
@@ -117,13 +137,16 @@ if(PkgConfig_FOUND)
 else()
     message(STATUS "pkg-config not found; skipping g2o detection")
 endif()
+endif()
 
 # 设置输出目录（可选）
-set_target_properties(basicslam_lib PROPERTIES
-    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
+if(BUILD_PIPELINE)
+    set_target_properties(basicslam_lib PROPERTIES
+        ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+endif()
 
 # ---- Tests: 为 Tests/*.cpp 每个创建一个可执行并链接 basicslam_lib ----
 enable_testing()
@@ -131,13 +154,20 @@ enable_testing()
 file(GLOB TEST_SOURCES RELATIVE ${CMAKE_SOURCE_DIR} CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/Tests/*.cpp)
 # Exclude VisualOdometry-dependent test if VO module is removed
 list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testVO\\.cpp$")
+# Skip project-specific tests when源码不可用
+list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testP0Features\\.cpp$")
 
 foreach(test_src IN LISTS TEST_SOURCES)
     # test_src is like "Tests/test_foo.cpp"
     get_filename_component(test_name ${test_src} NAME_WE) # test_foo
     add_executable(${test_name} ${test_src})
-    target_link_libraries(${test_name} PRIVATE basicslam_lib ${OpenCV_LIBS})
-    target_include_directories(${test_name} PRIVATE ${PROJ_INCLUDE_DIR})
+    if(BUILD_PIPELINE)
+        target_link_libraries(${test_name} PRIVATE basicslam_lib)
+    endif()
+    target_link_libraries(${test_name} PRIVATE ${OpenCV_LIBS})
+    if(EXISTS ${PROJ_INCLUDE_DIR})
+        target_include_directories(${test_name} PRIVATE ${PROJ_INCLUDE_DIR})
+    endif()
 
     # 将可执行放在统一目录（可选）
     set_target_properties(${test_name} PROPERTIES
