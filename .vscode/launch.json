@@ -26,12 +26,15 @@
             "preLaunchTask": "Build Project"
         },
         {
-            "name": "Launch testMinimum",
+            "name": "Launch test_vo_eval",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/tests/testMinimum",
-            "args": [],
-            "cwd": "${workspaceFolder}/build/tests",
+            "program": "${workspaceFolder}/build/tests/test_vo_eval",
+            "args": [
+                "${workspaceFolder}/datasets/EuRoC/MH01/mav0/state_groundtruth_estimate0/data.csv",
+                "${workspaceFolder}/datasets/EuRoC/MH01/mav0/cam0/data/result/20260105_222009/trajectory_tum.csv"
+            ],
+            "cwd": "${workspaceFolder}",
             "stopAtEntry": false,
             "environment": [],
             "externalConsole": false,

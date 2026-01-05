@@ -13,9 +13,11 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    std::string imgDir = "../../datasets/iphone/2025-11-05_170303";
+    // std::string imgDir = "../../datasets/iphone/2025-11-05_170303";
+    std::string imgDir = "../../datasets/EuRoC/MH01/mav0/cam0/data";
+    // std::string imgDir = "../../datasets/vivo/room2";
     if(argc >= 2) imgDir = argv[1];
-    double scale_m = (argc >= 3) ? std::atof(argv[2]) : 0.02;
+    double scale_m = (argc >= 3) ? std::atof(argv[2]) : 0.01;
 
     cv::Ptr<cv::Feature2D> feature = cv::ORB::create(2000);
     cv::Ptr<cv::DescriptorMatcher> matcher = cv::DescriptorMatcher::create(cv::DescriptorMatcher::BRUTEFORCE_HAMMING);
